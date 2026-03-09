@@ -12,6 +12,7 @@ import type {
   BridgeResult,
   BridgeState,
   ExportedConfig,
+  RemoteProbe,
   SendOptions,
   SessionMessage,
   SessionMetadata,
@@ -27,9 +28,7 @@ export interface GatewayAdapter {
     childSessionKey: string,
     message: string
   ): Promise<BridgeResult<{ reply: string }>>;
-  sessionStatus(
-    childSessionKey: string
-  ): Promise<BridgeResult<{ alive: boolean; rawText?: string }>>;
+  sessionStatus(childSessionKey: string): Promise<BridgeResult<Omit<RemoteProbe, "sessionKey">>>;
 }
 
 type ChatHistoryMessage = {
@@ -108,8 +107,16 @@ export class SimulatedGateway implements GatewayAdapter {
 
   async sessionStatus(
     _childSessionKey: string
-  ): Promise<BridgeResult<{ alive: boolean; rawText?: string }>> {
-    return { ok: true, data: { alive: true, rawText: "simulated: alive" } };
+  ): Promise<BridgeResult<Omit<RemoteProbe, "sessionKey">>> {
+    return {
+      ok: true,
+      data: {
+        alive: true,
+        reusableLikely: true,
+        transportState: "warm",
+        rawText: "simulated: alive",
+      },
+    };
   }
 }
 
@@ -263,7 +270,7 @@ export class RealGatewayCliAdapter implements GatewayAdapter {
 
   async sessionStatus(
     childSessionKey: string
-  ): Promise<BridgeResult<{ alive: boolean; rawText?: string }>> {
+  ): Promise<BridgeResult<Omit<RemoteProbe, "sessionKey">>> {
     try {
       const before = extractAssistantTexts(this.chatHistory()).length;
       this.sendSlashCommand(`/acp status ${sanitizeSlashToken(childSessionKey)}`);
@@ -271,12 +278,27 @@ export class RealGatewayCliAdapter implements GatewayAdapter {
         value.includes("ACP status:") || value.includes("Unable to resolve session target")
       );
       const lower = text.toLowerCase();
-      const alive =
-        !lower.includes("unable to resolve session target") &&
-        !lower.includes("runtime: status=dead") &&
-        !lower.includes("state: dead") &&
-        !lower.includes("missing acp metadata");
-      return { ok: true, data: { alive, rawText: text } };
+      const missing =
+        lower.includes("unable to resolve session target") ||
+        lower.includes("missing acp metadata") ||
+        lower.includes("state: dead");
+      const cold =
+        !missing &&
+        (lower.includes("runtime: status=dead") ||
+          lower.includes("queue owner unavailable") ||
+          lower.includes("summary: queue owner unavailable"));
+      const alive = !missing && !cold;
+      const transportState = missing ? "missing" : cold ? "cold" : "warm";
+      const reusableLikely = transportState !== "missing";
+      return {
+        ok: true,
+        data: {
+          alive,
+          reusableLikely,
+          transportState,
+          rawText: text,
+        },
+      };
     } catch (err) {
       return { ok: false, error: formatExecError(err) };
     }
@@ -440,7 +462,7 @@ export class SessionBridge {
     };
   }
 
-  async probe(sessionKey?: string): Promise<BridgeResult<{ sessionKey: string; alive: boolean; rawText?: string }>> {
+  async probe(sessionKey?: string): Promise<BridgeResult<RemoteProbe>> {
     const state = this.load();
     const key = sessionKey ?? state.activeSessionKey;
     if (!key) {
@@ -459,6 +481,8 @@ export class SessionBridge {
       data: {
         sessionKey: key,
         alive: result.data.alive,
+        reusableLikely: result.data.reusableLikely,
+        transportState: result.data.transportState,
         rawText: result.data.rawText,
       },
     };

@@ -89,7 +89,15 @@ class SimulatedGateway {
         };
     }
     async sessionStatus(_childSessionKey) {
-        return { ok: true, data: { alive: true, rawText: "simulated: alive" } };
+        return {
+            ok: true,
+            data: {
+                alive: true,
+                reusableLikely: true,
+                transportState: "warm",
+                rawText: "simulated: alive",
+            },
+        };
     }
 }
 exports.SimulatedGateway = SimulatedGateway;
@@ -216,11 +224,25 @@ class RealGatewayCliAdapter {
             this.sendSlashCommand(`/acp status ${sanitizeSlashToken(childSessionKey)}`);
             const text = await this.waitForNewAssistantText(before, (value) => value.includes("ACP status:") || value.includes("Unable to resolve session target"));
             const lower = text.toLowerCase();
-            const alive = !lower.includes("unable to resolve session target") &&
-                !lower.includes("runtime: status=dead") &&
-                !lower.includes("state: dead") &&
-                !lower.includes("missing acp metadata");
-            return { ok: true, data: { alive, rawText: text } };
+            const missing = lower.includes("unable to resolve session target") ||
+                lower.includes("missing acp metadata") ||
+                lower.includes("state: dead");
+            const cold = !missing &&
+                (lower.includes("runtime: status=dead") ||
+                    lower.includes("queue owner unavailable") ||
+                    lower.includes("summary: queue owner unavailable"));
+            const alive = !missing && !cold;
+            const transportState = missing ? "missing" : cold ? "cold" : "warm";
+            const reusableLikely = transportState !== "missing";
+            return {
+                ok: true,
+                data: {
+                    alive,
+                    reusableLikely,
+                    transportState,
+                    rawText: text,
+                },
+            };
         }
         catch (err) {
             return { ok: false, error: formatExecError(err) };
@@ -370,6 +392,8 @@ class SessionBridge {
             data: {
                 sessionKey: key,
                 alive: result.data.alive,
+                reusableLikely: result.data.reusableLikely,
+                transportState: result.data.transportState,
                 rawText: result.data.rawText,
             },
         };

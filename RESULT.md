@@ -32,6 +32,8 @@ https://github.com/jkf87/openclaw-claude-session-bridge
 
 ## What was validated
 
+### Simulation
+
 Simulation script (`npm run simulate`) exercises:
 1. Fresh spawn — session created with key, label, tags
 2. Follow-up send — messages delivered and history tracked
@@ -40,6 +42,15 @@ Simulation script (`npm run simulate`) exercises:
 5. Config/binding export — bind metadata, export JSON, import into fresh bridge
 
 **Result: 23/23 assertions passed.**
+
+### Real-mode smoke test (OpenClaw Gateway + /acp slash commands)
+
+Validated on a local OpenClaw install by:
+- installing from the public GitHub repo into a separate consumer project
+- running: `init → spawn → send → send → status`
+- confirming that the *same* saved `childSessionKey` can be steered multiple times across invocations
+
+Note: `/acp status` may report `runtime: status=dead` / `queue owner unavailable` even when the next `/acp steer` can still revive/continue the session. The bridge now classifies this as `transportState=cold` (likely reusable) rather than treating it as permanently dead.
 
 ## Known limitations
 

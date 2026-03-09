@@ -1,4 +1,4 @@
-import type { BridgeResult, ExportedConfig, SendOptions, SessionMetadata, SessionRecord, SpawnOptions } from "./types";
+import type { BridgeResult, ExportedConfig, RemoteProbe, SendOptions, SessionMetadata, SessionRecord, SpawnOptions } from "./types";
 export interface GatewayAdapter {
     sessionSpawn(opts?: SpawnOptions & {
         cwd?: string;
@@ -10,10 +10,7 @@ export interface GatewayAdapter {
     sessionSend(childSessionKey: string, message: string): Promise<BridgeResult<{
         reply: string;
     }>>;
-    sessionStatus(childSessionKey: string): Promise<BridgeResult<{
-        alive: boolean;
-        rawText?: string;
-    }>>;
+    sessionStatus(childSessionKey: string): Promise<BridgeResult<Omit<RemoteProbe, "sessionKey">>>;
 }
 export declare class SimulatedGateway implements GatewayAdapter {
     sessionSpawn(_opts?: SpawnOptions & {
@@ -25,10 +22,7 @@ export declare class SimulatedGateway implements GatewayAdapter {
     sessionSend(childSessionKey: string, message: string): Promise<BridgeResult<{
         reply: string;
     }>>;
-    sessionStatus(_childSessionKey: string): Promise<BridgeResult<{
-        alive: boolean;
-        rawText?: string;
-    }>>;
+    sessionStatus(_childSessionKey: string): Promise<BridgeResult<Omit<RemoteProbe, "sessionKey">>>;
 }
 export declare class RealGatewayCliAdapter implements GatewayAdapter {
     private readonly openclawBin;
@@ -57,10 +51,7 @@ export declare class RealGatewayCliAdapter implements GatewayAdapter {
     sessionSend(childSessionKey: string, message: string): Promise<BridgeResult<{
         reply: string;
     }>>;
-    sessionStatus(childSessionKey: string): Promise<BridgeResult<{
-        alive: boolean;
-        rawText?: string;
-    }>>;
+    sessionStatus(childSessionKey: string): Promise<BridgeResult<Omit<RemoteProbe, "sessionKey">>>;
 }
 export declare class SessionBridge {
     private statePath?;
@@ -86,11 +77,7 @@ export declare class SessionBridge {
         sessionKey: string;
     }>>;
     status(sessionKey?: string): BridgeResult;
-    probe(sessionKey?: string): Promise<BridgeResult<{
-        sessionKey: string;
-        alive: boolean;
-        rawText?: string;
-    }>>;
+    probe(sessionKey?: string): Promise<BridgeResult<RemoteProbe>>;
     bind(sessionKey: string, updates: Partial<Pick<SessionMetadata, "label" | "tags">>): BridgeResult<SessionRecord>;
     exportConfig(sessionKeys?: string[]): BridgeResult<ExportedConfig>;
     importConfig(config: ExportedConfig): BridgeResult<{

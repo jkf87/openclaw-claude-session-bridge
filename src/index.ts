@@ -18,4 +18,5 @@ export type {
   SendOptions,
   BridgeResult,
   ExportedConfig,
+  RemoteProbe,
 } from "./types";

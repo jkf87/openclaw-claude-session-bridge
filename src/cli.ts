@@ -55,7 +55,7 @@ program
   .description(
     "Maintain durable Claude Code ACP sessions through OpenClaw session primitives."
   )
-  .version("0.1.2")
+  .version("0.1.3")
   .option("--real", "Use the real OpenClaw Gateway via slash commands in a manager session")
   .option("--state-path <path>", "Override the bridge state file path")
   .option(

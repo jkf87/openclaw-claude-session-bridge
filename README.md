@@ -180,13 +180,16 @@ The bridge currently provides **local binding metadata** (`label`, `tags`) and c
 
 ### Status
 
-The bridge uses `/acp status <childSessionKey>` and parses the resulting text to determine whether the remote runtime appears alive.
+The bridge uses `/acp status <childSessionKey>` and classifies the transport as:
+- `warm`: queue owner reachable right now
+- `cold`: queue owner unavailable (often revivable on next steer)
+- `missing`: target cannot be resolved
 
 ## Honest limitations
 
 - **Real mode depends on OpenClaw CLI/Gateway** being configured and reachable.
 - **Manager-session based**: real mode currently relies on supported slash-command flows rather than a dedicated public Node RPC for ACP spawn/steer.
-- **Session lifetime is not guaranteed**: a saved `childSessionKey` may later report dead or stale if the ACP runtime has exited.
+- **Session lifetime is not guaranteed**: a saved `childSessionKey` may go `cold` (queue owner unavailable) or become truly missing depending on ACP runtime and local records.
 - **Local binding only**: this tool stores labels/tags locally; it does not configure Telegram/Discord thread binding policy for you.
 - **History is capped** at 50 messages per session to bound state size.
 

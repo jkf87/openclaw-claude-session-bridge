@@ -64,6 +64,18 @@ export interface BridgeResult<T = unknown> {
   error?: string;
 }
 
+/** Remote ACP runtime interpretation from bridge probing. */
+export interface RemoteProbe {
+  sessionKey: string;
+  /** True when the queue owner appears reachable right now. */
+  alive: boolean;
+  /** True when the session still looks steerable/recoverable even if not warm. */
+  reusableLikely: boolean;
+  /** warm = healthy queue owner, cold = queue owner unavailable but session likely recoverable, missing = target cannot be resolved */
+  transportState: "warm" | "cold" | "missing";
+  rawText?: string;
+}
+
 /** Exported config for sharing / importing session bindings. */
 export interface ExportedConfig {
   exportedAt: string;
