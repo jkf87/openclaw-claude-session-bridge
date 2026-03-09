@@ -1,0 +1,42 @@
+{
+  "name": "openclaw-claude-session-bridge",
+  "version": "0.1.0",
+  "description": "A CLI/library for maintaining durable Claude Code ACP sessions through OpenClaw session primitives (spawn, send, resume, bind).",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "openclaw-bridge": "./bin/openclaw-bridge.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "simulate": "node dist/simulate/scenarios.js",
+    "clean": "rm -rf dist",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "openclaw",
+    "claude",
+    "acp",
+    "session",
+    "bridge",
+    "agent"
+  ],
+  "author": "jkf87",
+  "license": "MIT",
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "@types/node": "^20.11.0"
+  },
+  "dependencies": {
+    "commander": "^12.1.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "files": [
+    "dist",
+    "bin",
+    "README.md",
+    "LICENSE"
+  ]
+}
