@@ -1,19 +1,5 @@
-/**
- * Core bridge logic — spawn, send, resume, status, bind, export.
- *
- * This module implements the session lifecycle by:
- *  1. Calling OpenClaw Gateway RPC/CLI for session operations.
- *  2. Persisting the resulting session keys and metadata locally.
- *
- * IMPORTANT HONESTY NOTE:
- * The actual ACP session_spawn / session_send RPCs depend on the OpenClaw
- * Gateway being available and the agent having proper credentials. When the
- * gateway is unreachable, this module falls back to **simulated** responses
- * so the CLI remains testable and demonstrable offline. Real gateway
- * integration replaces the `executeGatewayCall` function.
- */
-
 import * as crypto from "crypto";
+import { execFileSync } from "child_process";
 import {
   loadState,
   saveState,
@@ -33,20 +19,62 @@ import type {
   SpawnOptions,
 } from "./types";
 
-// ---------------------------------------------------------------------------
-// Gateway abstraction
-// ---------------------------------------------------------------------------
-
 export interface GatewayAdapter {
-  /** Spawn a new ACP child session. Returns a childSessionKey. */
-  sessionSpawn(parentKey?: string): Promise<BridgeResult<{ childSessionKey: string }>>;
-  /** Send a message to an existing child session. */
+  sessionSpawn(
+    opts?: SpawnOptions & { cwd?: string; agentId?: string }
+  ): Promise<BridgeResult<{ childSessionKey: string; rawText?: string }>>;
   sessionSend(
     childSessionKey: string,
     message: string
   ): Promise<BridgeResult<{ reply: string }>>;
-  /** Check if a session is still alive. */
-  sessionStatus(childSessionKey: string): Promise<BridgeResult<{ alive: boolean }>>;
+  sessionStatus(
+    childSessionKey: string
+  ): Promise<BridgeResult<{ alive: boolean; rawText?: string }>>;
+}
+
+type ChatHistoryMessage = {
+  role?: string;
+  content?: Array<{ type?: string; text?: string }>;
+};
+
+type ChatHistoryResult = {
+  sessionKey?: string;
+  messages?: ChatHistoryMessage[];
+};
+
+const ACP_SESSION_KEY_RE = /(agent:[a-z0-9_-]+:acp:[0-9a-f-]+)/i;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function extractText(message: ChatHistoryMessage): string {
+  return (message.content ?? [])
+    .filter((part) => part.type === "text" && typeof part.text === "string")
+    .map((part) => part.text ?? "")
+    .join("\n")
+    .trim();
+}
+
+function extractAssistantTexts(history: ChatHistoryResult): string[] {
+  return (history.messages ?? [])
+    .filter((message) => message.role === "assistant")
+    .map(extractText)
+    .filter(Boolean);
+}
+
+function quoteSlashArg(value: string): string {
+  return JSON.stringify(value);
+}
+
+function formatExecError(err: unknown): string {
+  if (err instanceof Error) {
+    const anyErr = err as Error & { stdout?: string | Buffer; stderr?: string | Buffer };
+    const stdout = anyErr.stdout ? String(anyErr.stdout) : "";
+    const stderr = anyErr.stderr ? String(anyErr.stderr) : "";
+    return [err.message, stdout.trim(), stderr.trim()].filter(Boolean).join(" | ");
+  }
+  return String(err);
 }
 
 // ---------------------------------------------------------------------------
@@ -55,7 +83,7 @@ export interface GatewayAdapter {
 
 export class SimulatedGateway implements GatewayAdapter {
   async sessionSpawn(
-    _parentKey?: string
+    _opts?: SpawnOptions & { cwd?: string; agentId?: string }
   ): Promise<BridgeResult<{ childSessionKey: string }>> {
     const key = `acp_sim_${crypto.randomBytes(8).toString("hex")}`;
     return { ok: true, data: { childSessionKey: key } };
@@ -75,8 +103,178 @@ export class SimulatedGateway implements GatewayAdapter {
 
   async sessionStatus(
     _childSessionKey: string
-  ): Promise<BridgeResult<{ alive: boolean }>> {
-    return { ok: true, data: { alive: true } };
+  ): Promise<BridgeResult<{ alive: boolean; rawText?: string }>> {
+    return { ok: true, data: { alive: true, rawText: "simulated: alive" } };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Real gateway adapter via `openclaw gateway call` + slash commands
+// ---------------------------------------------------------------------------
+
+export class RealGatewayCliAdapter implements GatewayAdapter {
+  private readonly openclawBin: string;
+  private readonly managerSessionKey: string;
+  private readonly timeoutMs: number;
+  private readonly defaultAgentId: string;
+  private readonly defaultCwd: string;
+
+  constructor(opts?: {
+    openclawBin?: string;
+    managerSessionKey?: string;
+    timeoutMs?: number;
+    agentId?: string;
+    cwd?: string;
+  }) {
+    this.openclawBin =
+      opts?.openclawBin ?? process.env.OPENCLAW_BRIDGE_OPENCLAW_BIN ?? "openclaw";
+    this.managerSessionKey =
+      opts?.managerSessionKey ??
+      process.env.OPENCLAW_BRIDGE_MANAGER_SESSION ??
+      "bridge:manager:claude";
+    this.timeoutMs = Math.max(
+      5_000,
+      opts?.timeoutMs ?? Number(process.env.OPENCLAW_BRIDGE_TIMEOUT_MS ?? 60_000)
+    );
+    this.defaultAgentId = opts?.agentId ?? process.env.OPENCLAW_BRIDGE_AGENT ?? "claude";
+    this.defaultCwd = opts?.cwd ?? process.cwd();
+  }
+
+  private gatewayCall<T>(method: string, params: Record<string, unknown>): T {
+    try {
+      const stdout = execFileSync(
+        this.openclawBin,
+        [
+          "gateway",
+          "call",
+          method,
+          "--json",
+          "--timeout",
+          String(this.timeoutMs),
+          "--params",
+          JSON.stringify(params),
+        ],
+        {
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "pipe"],
+          maxBuffer: 8 * 1024 * 1024,
+        }
+      );
+      return JSON.parse(stdout) as T;
+    } catch (err) {
+      throw new Error(formatExecError(err));
+    }
+  }
+
+  private chatHistory(): ChatHistoryResult {
+    return this.gatewayCall<ChatHistoryResult>("chat.history", {
+      sessionKey: this.managerSessionKey,
+      limit: 200,
+    });
+  }
+
+  private sendSlashCommand(command: string): void {
+    this.gatewayCall("chat.send", {
+      sessionKey: this.managerSessionKey,
+      message: command,
+      idempotencyKey: crypto.randomUUID(),
+    });
+  }
+
+  private async waitForNewAssistantText(
+    beforeAssistantCount: number,
+    matcher?: (text: string) => boolean
+  ): Promise<string> {
+    const deadline = Date.now() + this.timeoutMs;
+
+    while (Date.now() < deadline) {
+      await sleep(1_500);
+      const history = this.chatHistory();
+      const texts = extractAssistantTexts(history);
+      const newTexts = texts.slice(beforeAssistantCount);
+      if (newTexts.length === 0) {
+        continue;
+      }
+      const combined = newTexts.join("\n\n").trim();
+      if (!matcher || matcher(combined)) {
+        return combined;
+      }
+    }
+
+    throw new Error("Timed out waiting for ACP slash-command response.");
+  }
+
+  async sessionSpawn(
+    opts?: SpawnOptions & { cwd?: string; agentId?: string }
+  ): Promise<BridgeResult<{ childSessionKey: string; rawText?: string }>> {
+    try {
+      const before = extractAssistantTexts(this.chatHistory()).length;
+      const agentId = opts?.agentId ?? this.defaultAgentId;
+      const cwd = opts?.cwd ?? this.defaultCwd;
+      const parts = [
+        "/acp spawn",
+        agentId,
+        "--mode",
+        "persistent",
+        "--thread",
+        "off",
+        "--cwd",
+        quoteSlashArg(cwd),
+      ];
+      if (opts?.label) {
+        parts.push("--label", quoteSlashArg(opts.label));
+      }
+      this.sendSlashCommand(parts.join(" "));
+      const text = await this.waitForNewAssistantText(before, (value) =>
+        ACP_SESSION_KEY_RE.test(value)
+      );
+      const match = text.match(ACP_SESSION_KEY_RE);
+      if (!match) {
+        return { ok: false, error: `Unable to parse child session key from: ${text}` };
+      }
+      return {
+        ok: true,
+        data: { childSessionKey: match[1], rawText: text },
+      };
+    } catch (err) {
+      return { ok: false, error: formatExecError(err) };
+    }
+  }
+
+  async sessionSend(
+    childSessionKey: string,
+    message: string
+  ): Promise<BridgeResult<{ reply: string }>> {
+    try {
+      const before = extractAssistantTexts(this.chatHistory()).length;
+      const command = `/acp steer --session ${childSessionKey} ${message}`;
+      this.sendSlashCommand(command);
+      const text = await this.waitForNewAssistantText(before);
+      return { ok: true, data: { reply: text } };
+    } catch (err) {
+      return { ok: false, error: formatExecError(err) };
+    }
+  }
+
+  async sessionStatus(
+    childSessionKey: string
+  ): Promise<BridgeResult<{ alive: boolean; rawText?: string }>> {
+    try {
+      const before = extractAssistantTexts(this.chatHistory()).length;
+      this.sendSlashCommand(`/acp status ${childSessionKey}`);
+      const text = await this.waitForNewAssistantText(before, (value) =>
+        value.includes("ACP status:") || value.includes("Unable to resolve session target")
+      );
+      const lower = text.toLowerCase();
+      const alive =
+        !lower.includes("unable to resolve session target") &&
+        !lower.includes("runtime: status=dead") &&
+        !lower.includes("state: dead") &&
+        !lower.includes("missing acp metadata");
+      return { ok: true, data: { alive, rawText: text } };
+    } catch (err) {
+      return { ok: false, error: formatExecError(err) };
+    }
   }
 }
 
@@ -87,13 +285,20 @@ export class SimulatedGateway implements GatewayAdapter {
 export class SessionBridge {
   private statePath?: string;
   private gateway: GatewayAdapter;
+  private defaultSpawnAgentId?: string;
+  private defaultSpawnCwd?: string;
 
-  constructor(opts?: { statePath?: string; gateway?: GatewayAdapter }) {
+  constructor(opts?: {
+    statePath?: string;
+    gateway?: GatewayAdapter;
+    defaultSpawnAgentId?: string;
+    defaultSpawnCwd?: string;
+  }) {
     this.statePath = opts?.statePath;
     this.gateway = opts?.gateway ?? new SimulatedGateway();
+    this.defaultSpawnAgentId = opts?.defaultSpawnAgentId;
+    this.defaultSpawnCwd = opts?.defaultSpawnCwd;
   }
-
-  // -- helpers --
 
   private load(): BridgeState {
     return loadState(this.statePath);
@@ -107,18 +312,18 @@ export class SessionBridge {
     return new Date().toISOString();
   }
 
-  // -- public API --
-
-  /** Initialize the bridge state directory. Idempotent. */
   init(): BridgeResult {
     const state = this.load();
     this.save(state);
     return { ok: true, data: { statePath: getStatePath(this.statePath) } };
   }
 
-  /** Spawn a new Claude ACP child session. */
-  async spawn(opts?: SpawnOptions): Promise<BridgeResult<SessionRecord>> {
-    const result = await this.gateway.sessionSpawn(opts?.parentSessionKey);
+  async spawn(opts?: SpawnOptions & { cwd?: string; agentId?: string }): Promise<BridgeResult<SessionRecord>> {
+    const result = await this.gateway.sessionSpawn({
+      ...opts,
+      cwd: opts?.cwd ?? this.defaultSpawnCwd,
+      agentId: opts?.agentId ?? this.defaultSpawnAgentId,
+    });
     if (!result.ok || !result.data) {
       return { ok: false, error: result.error ?? "Gateway spawn failed" };
     }
@@ -136,7 +341,9 @@ export class SessionBridge {
       parentSessionKey: opts?.parentSessionKey,
       status: "active",
       metadata: meta,
-      history: [],
+      history: result.data.rawText
+        ? [{ role: "assistant", content: result.data.rawText, timestamp: now }]
+        : [],
     };
 
     let state = this.load();
@@ -147,7 +354,6 @@ export class SessionBridge {
     return { ok: true, data: record };
   }
 
-  /** Send a follow-up message to an existing session. */
   async send(
     message: string,
     opts?: SendOptions
@@ -170,6 +376,10 @@ export class SessionBridge {
 
     const result = await this.gateway.sessionSend(key, message);
     if (!result.ok || !result.data) {
+      session.status = "error";
+      session.metadata.updatedAt = this.now();
+      state = putSession(state, session);
+      this.save(state);
       return { ok: false, error: result.error ?? "Gateway send failed" };
     }
 
@@ -184,7 +394,6 @@ export class SessionBridge {
     session.history.push(userMsg, assistantMsg);
     session.metadata.updatedAt = now;
 
-    // Keep last 50 messages to bound state size.
     if (session.history.length > 50) {
       session.history = session.history.slice(-50);
     }
@@ -195,7 +404,6 @@ export class SessionBridge {
     return { ok: true, data: { reply: result.data.reply, sessionKey: key } };
   }
 
-  /** Get the status of the bridge and its sessions. */
   status(sessionKey?: string): BridgeResult {
     const state = this.load();
 
@@ -227,7 +435,30 @@ export class SessionBridge {
     };
   }
 
-  /** Bind / update metadata on an existing session. */
+  async probe(sessionKey?: string): Promise<BridgeResult<{ sessionKey: string; alive: boolean; rawText?: string }>> {
+    const state = this.load();
+    const key = sessionKey ?? state.activeSessionKey;
+    if (!key) {
+      return { ok: false, error: "No active session to probe." };
+    }
+    const local = getSession(state, key);
+    if (!local) {
+      return { ok: false, error: `Session ${key} not found in local state.` };
+    }
+    const result = await this.gateway.sessionStatus(key);
+    if (!result.ok || !result.data) {
+      return { ok: false, error: result.error ?? "Gateway status failed" };
+    }
+    return {
+      ok: true,
+      data: {
+        sessionKey: key,
+        alive: result.data.alive,
+        rawText: result.data.rawText,
+      },
+    };
+  }
+
   bind(
     sessionKey: string,
     updates: Partial<Pick<SessionMetadata, "label" | "tags">>
@@ -249,7 +480,6 @@ export class SessionBridge {
     return { ok: true, data: session };
   }
 
-  /** Export all (or selected) session configs for sharing / backup. */
   exportConfig(sessionKeys?: string[]): BridgeResult<ExportedConfig> {
     const state = this.load();
     const allSessions = Object.values(state.sessions);
@@ -266,7 +496,6 @@ export class SessionBridge {
     };
   }
 
-  /** Import session records from an exported config (for resume on another machine). */
   importConfig(config: ExportedConfig): BridgeResult<{ imported: number }> {
     let state = this.load();
     let count = 0;

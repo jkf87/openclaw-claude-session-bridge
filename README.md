@@ -1,31 +1,53 @@
 # openclaw-claude-session-bridge
 
-A TypeScript CLI and library for maintaining **durable Claude Code ACP sessions** through OpenClaw session primitives.
+A TypeScript CLI/library for maintaining **durable Claude Code ACP sessions** through OpenClaw session primitives.
 
 ## What it does
 
-This tool lets an OpenClaw agent (or any automation) keep a persistent conversation with a Claude Code child session by:
+This tool helps an OpenClaw agent or operator keep talking to the **same Claude ACP session** by:
 
-1. **Spawning** a new ACP child session (`sessions_spawn`)
-2. **Sending** follow-up messages to the same child session (`sessions_send`)
-3. **Persisting** session keys and metadata to a local state file so the session can be resumed later
-4. **Inspecting** bridge state at any time
-5. **Binding** metadata (labels, tags) to sessions for organization
-6. **Exporting/importing** session configs for backup or cross-machine transfer
+1. **Spawning** a Claude ACP session
+2. **Sending** follow-up messages to the same child session key
+3. **Persisting** session keys and metadata to a local state file
+4. **Probing** whether the remote ACP session still looks alive
+5. **Binding** local metadata (labels, tags) for organization
+6. **Exporting/importing** saved bridge state
+
+## Two modes
+
+### 1) Simulated mode
+
+Default mode for offline testing and the included scenario suite.
+
+- No OpenClaw Gateway required
+- Messages are echoed locally
+- Safe for demos and CI-like validation
+
+### 2) Real mode (`--real`)
+
+Real mode drives OpenClaw through:
+
+- `openclaw gateway call chat.send`
+- `openclaw gateway call chat.history`
+- slash commands in a dedicated **manager session**:
+  - `/acp spawn ...`
+  - `/acp steer --session ...`
+  - `/acp status ...`
+
+This is honest about current OpenClaw surfaces: the bridge does **not** call a hidden direct `sessions_spawn` RPC from Node. Instead, it uses supported Gateway chat/slash-command flows that are available today.
 
 ## Installation
 
 ```bash
-# From source
 git clone https://github.com/jkf87/openclaw-claude-session-bridge.git
 cd openclaw-claude-session-bridge
 npm install
 npm run build
+```
 
-# Use the CLI
-./bin/openclaw-bridge.js --help
+Optional global install:
 
-# Or link globally
+```bash
 npm link
 openclaw-bridge --help
 ```
@@ -37,119 +59,136 @@ openclaw-bridge --help
 | `init` | Initialize the bridge state directory (`.openclaw-bridge/`) |
 | `spawn` | Spawn a new Claude ACP child session |
 | `send <message>` | Send a follow-up message to the active session |
-| `status [sessionKey]` | Show bridge status or session details |
-| `bind <sessionKey>` | Update metadata (label, tags) on a session |
+| `status [sessionKey]` | Show local state, and with `--real` also probe remote ACP status |
+| `bind <sessionKey>` | Update local metadata (label, tags) on a session |
 | `export-config` | Export session bindings as JSON |
+| `import-config <file>` | Import a previously exported bridge config |
 
-### Examples
+## Real mode usage
 
 ```bash
-# Initialize
+# initialize local state
+openclaw-bridge --real --manager-session bridge:manager:claude init
+
+# spawn a persistent Claude ACP session
+openclaw-bridge \
+  --real \
+  --manager-session bridge:manager:claude \
+  --cwd /absolute/path/to/project \
+  spawn --label "bridge-test"
+
+# send follow-ups to the saved active session
+openclaw-bridge --real --manager-session bridge:manager:claude send "Reply with exactly: HELLO"
+openclaw-bridge --real --manager-session bridge:manager:claude send "Now say SECOND"
+
+# inspect local + remote status
+openclaw-bridge --real --manager-session bridge:manager:claude status
+
+# bind local metadata
+openclaw-bridge --real --manager-session bridge:manager:claude bind <childSessionKey> --label "important" --tag env=prod
+```
+
+## Simulated mode usage
+
+```bash
 openclaw-bridge init
-
-# Spawn a labeled session
-openclaw-bridge spawn --label "my-task" --tag env=production
-
-# Send messages (goes to the active session automatically)
-openclaw-bridge send "What files are in the project?"
-openclaw-bridge send "Refactor the auth module"
-
-# Check status
+openclaw-bridge spawn --label "demo"
+openclaw-bridge send "Hello Claude"
 openclaw-bridge status
-
-# Bind metadata
-openclaw-bridge bind acp_sim_abc123 --label "renamed" --tag priority=high
-
-# Export for backup
-openclaw-bridge export-config > backup.json
 ```
 
 ## Library API
 
-```typescript
-import { SessionBridge } from "openclaw-claude-session-bridge";
+```ts
+import {
+  RealGatewayCliAdapter,
+  SessionBridge,
+} from "openclaw-claude-session-bridge";
 
-const bridge = new SessionBridge();
-bridge.init();
+const bridge = new SessionBridge({
+  gateway: new RealGatewayCliAdapter({
+    managerSessionKey: "bridge:manager:claude",
+    cwd: process.cwd(),
+    agentId: "claude",
+  }),
+});
 
-// Spawn
-const { data } = await bridge.spawn({ label: "my-session" });
-console.log(data.childSessionKey);
-
-// Send
-const reply = await bridge.send("Hello, Claude");
-console.log(reply.data.reply);
-
-// Status
-const status = bridge.status();
-console.log(status.data);
+await bridge.spawn({ label: "my-session" });
+await bridge.send("Continue from the previous instruction.");
+const probe = await bridge.probe();
+console.log(probe.data);
 ```
 
 ## Architecture
 
-```
+```text
 openclaw-claude-session-bridge/
 ├── src/
-│   ├── types.ts      # Core TypeScript interfaces
-│   ├── state.ts      # Durable local state (JSON file persistence)
-│   ├── bridge.ts     # Session lifecycle: spawn, send, resume, bind, export
-│   ├── cli.ts        # Commander-based CLI
-│   └── index.ts      # Public API surface
+│   ├── types.ts
+│   ├── state.ts
+│   ├── bridge.ts      # simulated + real CLI gateway adapters
+│   ├── cli.ts
+│   └── index.ts
 ├── simulate/
-│   └── scenarios.ts  # 5-scenario validation script
+│   └── scenarios.ts
 ├── bin/
-│   └── openclaw-bridge.js  # CLI entry point
+│   └── openclaw-bridge.js
 ├── package.json
 ├── tsconfig.json
 ├── LICENSE
 └── README.md
 ```
 
-### State file
+## State file
 
-The bridge persists all session data in `.openclaw-bridge/bridge-state.json`:
+The bridge persists state in `.openclaw-bridge/bridge-state.json` under the current working directory by default.
+
+Example:
 
 ```json
 {
   "version": 1,
-  "activeSessionKey": "acp_sim_abc123...",
+  "activeSessionKey": "agent:claude:acp:...",
   "sessions": {
-    "acp_sim_abc123...": {
-      "childSessionKey": "acp_sim_abc123...",
+    "agent:claude:acp:...": {
+      "childSessionKey": "agent:claude:acp:...",
       "status": "active",
-      "metadata": { "label": "my-task", "createdAt": "...", "updatedAt": "..." },
-      "history": [ ... ]
+      "metadata": {
+        "label": "bridge-test",
+        "createdAt": "2026-03-10T...Z",
+        "updatedAt": "2026-03-10T...Z"
+      },
+      "history": []
     }
   }
 }
 ```
 
-This file survives across process restarts, enabling session resumption.
+## How this maps to OpenClaw ACP features
 
-## How this relates to OpenClaw ACP primitives
+### Spawn
 
-### `sessions_spawn`
+The bridge uses `/acp spawn claude --mode persistent --thread off --cwd ...` in a manager session and stores the returned `childSessionKey`.
 
-The `spawn` command/method maps to the ACP `sessions_spawn` primitive. It requests the OpenClaw Gateway to create a new child Claude session and returns a `childSessionKey` that uniquely identifies it.
+### Send
 
-### `sessions_send`
+The bridge uses `/acp steer --session <childSessionKey> ...` so later invocations can continue using the same saved session key.
 
-The `send` command/method maps to `sessions_send`. It delivers a follow-up message to an existing child session identified by its `childSessionKey`, maintaining conversational context.
+### Binding
 
-### ACP Bindings
+The bridge currently provides **local binding metadata** (`label`, `tags`) and config export/import. It does **not** mutate OpenClaw channel thread bindings.
 
-The `bind` and `export-config` commands relate to ACP session bindings — the ability to attach metadata to a session and persist that association. This bridge stores bindings locally, enabling:
+### Status
 
-- **Resumption**: A new process can load persisted state and continue the same ACP session.
-- **Portability**: Exported configs can be transferred to another machine or agent.
-- **Organization**: Labels and tags help manage multiple concurrent sessions.
+The bridge uses `/acp status <childSessionKey>` and parses the resulting text to determine whether the remote runtime appears alive.
 
-### Honest limitations
+## Honest limitations
 
-- **Simulated mode**: When the OpenClaw Gateway is not available, the bridge uses a simulated adapter that echoes messages locally. Real ACP session operations require a running gateway.
-- **Session lifetime**: ACP sessions may expire server-side. The bridge tracks local state optimistically; a stale `childSessionKey` will produce an error on the next real `send`.
-- **No server-side resume**: ACP does not currently support resuming a session from a saved conversation history. The `childSessionKey` is the only resumption handle — if the server-side session is gone, a new one must be spawned.
-- **Gateway adapter**: To connect to a real OpenClaw Gateway, implement the `GatewayAdapter` interface and pass it to `new SessionBridge({ gateway: yourAdapter })`.
+- **Real mode depends on OpenClaw CLI/Gateway** being configured and reachable.
+- **Manager-session based**: real mode currently relies on supported slash-command flows rather than a dedicated public Node RPC for ACP spawn/steer.
+- **Session lifetime is not guaranteed**: a saved `childSessionKey` may later report dead or stale if the ACP runtime has exited.
+- **Local binding only**: this tool stores labels/tags locally; it does not configure Telegram/Discord thread binding policy for you.
+- **History is capped** at 50 messages per session to bound state size.
 
 ## Running the simulation
 
@@ -161,9 +200,9 @@ npm run simulate
 This exercises 5 scenarios:
 1. Fresh spawn
 2. Follow-up send to the same session
-3. Resume from saved state (new bridge instance)
-4. Missing session handling (graceful errors)
-5. Config/binding export and import flow
+3. Resume from saved state
+4. Missing session handling
+5. Config/binding export/import flow
 
 ## License
 

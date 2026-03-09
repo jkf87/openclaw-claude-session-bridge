@@ -1,6 +1,6 @@
 {
   "name": "openclaw-claude-session-bridge",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "A CLI/library for maintaining durable Claude Code ACP sessions through OpenClaw session primitives (spawn, send, resume, bind).",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
