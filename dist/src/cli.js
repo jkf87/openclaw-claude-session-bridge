@@ -69,7 +69,7 @@ function createBridge() {
 program
     .name("openclaw-bridge")
     .description("Maintain durable Claude Code ACP sessions through OpenClaw session primitives.")
-    .version("0.1.1")
+    .version("0.1.2")
     .option("--real", "Use the real OpenClaw Gateway via slash commands in a manager session")
     .option("--state-path <path>", "Override the bridge state file path")
     .option("--manager-session <key>", "Manager session key used to run /acp slash commands when --real is enabled")

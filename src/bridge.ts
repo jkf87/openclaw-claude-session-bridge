@@ -63,8 +63,13 @@ function extractAssistantTexts(history: ChatHistoryResult): string[] {
     .filter(Boolean);
 }
 
-function quoteSlashArg(value: string): string {
-  return JSON.stringify(value);
+function sanitizeSlashToken(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) return trimmed;
+  // Current /acp slash parsing is whitespace-token based on most surfaces;
+  // quotes are not reliably stripped. To stay robust, we avoid quoting and
+  // instead replace whitespace with underscores.
+  return trimmed.replace(/\s+/g, "_");
 }
 
 function formatExecError(err: unknown): string {
@@ -213,16 +218,16 @@ export class RealGatewayCliAdapter implements GatewayAdapter {
       const cwd = opts?.cwd ?? this.defaultCwd;
       const parts = [
         "/acp spawn",
-        agentId,
+        sanitizeSlashToken(agentId),
         "--mode",
         "persistent",
         "--thread",
         "off",
         "--cwd",
-        quoteSlashArg(cwd),
+        sanitizeSlashToken(cwd),
       ];
       if (opts?.label) {
-        parts.push("--label", quoteSlashArg(opts.label));
+        parts.push("--label", sanitizeSlashToken(opts.label));
       }
       this.sendSlashCommand(parts.join(" "));
       const text = await this.waitForNewAssistantText(before, (value) =>
@@ -247,7 +252,7 @@ export class RealGatewayCliAdapter implements GatewayAdapter {
   ): Promise<BridgeResult<{ reply: string }>> {
     try {
       const before = extractAssistantTexts(this.chatHistory()).length;
-      const command = `/acp steer --session ${childSessionKey} ${message}`;
+      const command = `/acp steer --session ${sanitizeSlashToken(childSessionKey)} ${message}`;
       this.sendSlashCommand(command);
       const text = await this.waitForNewAssistantText(before);
       return { ok: true, data: { reply: text } };
@@ -261,7 +266,7 @@ export class RealGatewayCliAdapter implements GatewayAdapter {
   ): Promise<BridgeResult<{ alive: boolean; rawText?: string }>> {
     try {
       const before = extractAssistantTexts(this.chatHistory()).length;
-      this.sendSlashCommand(`/acp status ${childSessionKey}`);
+      this.sendSlashCommand(`/acp status ${sanitizeSlashToken(childSessionKey)}`);
       const text = await this.waitForNewAssistantText(before, (value) =>
         value.includes("ACP status:") || value.includes("Unable to resolve session target")
       );
