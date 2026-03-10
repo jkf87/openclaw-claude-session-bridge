@@ -1,211 +1,88 @@
 # openclaw-claude-session-bridge
 
-A TypeScript CLI/library for maintaining **durable Claude Code ACP sessions** through OpenClaw session primitives.
+**ACP 세션 코디네이터 스킬** — OpenClaw 에이전트가 ACPX를 통해 외부 코딩 에이전트(Claude Code 등)의 세션을 지속적으로 관리할 수 있도록 하는 스킬 문서 + 레퍼런스 구현체입니다.
 
-## What it does
+## 핵심 문서
 
-This tool helps an OpenClaw agent or operator keep talking to the **same Claude ACP session** by:
+### [`SKILL.md`](./SKILL.md) — 스킬 문서 (메인)
 
-1. **Spawning** a Claude ACP session
-2. **Sending** follow-up messages to the same child session key
-3. **Persisting** session keys and metadata to a local state file
-4. **Probing** whether the remote ACP session still looks alive
-5. **Binding** local metadata (labels, tags) for organization
-6. **Exporting/importing** saved bridge state
+OpenClaw 에이전트에게 직접 제공할 수 있는 스킬 문서입니다. 다음을 포함합니다:
 
-## Two modes
+- **세션 상태 모델** (Warm / Cold / Missing)
+- **ACPX CLI 명령어 레퍼런스** (spawn, steer, status, revive)
+- **OpenClaw 슬래시 명령어** (/acp spawn, /acp steer, /acp status)
+- **코디네이터 의사결정 플로우** (기존 세션 확인 → 상태 판단 → 액션 선택)
+- **프롬프팅 5원칙** (누구 + 어디서 + 세션 전략 + 작업 범위 + 종료 조건)
+- **프롬프트 템플릿 및 안티패턴**
+- **Builder + Reviewer 팀 워크플로 패턴**
+- **실전 시나리오** (신규, 이어서, 복구)
 
-### 1) Simulated mode
+### 사용법
 
-Default mode for offline testing and the included scenario suite.
+SKILL.md를 OpenClaw 에이전트의 시스템 프롬프트나 스킬로 등록하면, 에이전트가 자동으로 세션 관리 판단을 수행합니다.
 
-- No OpenClaw Gateway required
-- Messages are echoed locally
-- Safe for demos and CI-like validation
+```
+# 에이전트에게 스킬 문서 제공
+→ SKILL.md 내용을 시스템 프롬프트에 포함
+→ 또는 OpenClaw 스킬 플러그인으로 등록
+```
 
-### 2) Real mode (`--real`)
+## TypeScript 레퍼런스 구현체
 
-Real mode drives OpenClaw through:
+`src/` 디렉토리에는 스킬 문서의 로직을 TypeScript로 구현한 CLI/라이브러리가 있습니다.
+이는 레퍼런스 구현이며, **스킬 문서만으로 에이전트가 동일한 판단을 내릴 수 있습니다.**
 
-- `openclaw gateway call chat.send`
-- `openclaw gateway call chat.history`
-- slash commands in a dedicated **manager session**:
-  - `/acp spawn ...`
-  - `/acp steer --session ...`
-  - `/acp status ...`
-
-This is honest about current OpenClaw surfaces: the bridge does **not** call a hidden direct `sessions_spawn` RPC from Node. Instead, it uses supported Gateway chat/slash-command flows that are available today.
-
-## Installation
+### 구현체 설치 (선택)
 
 ```bash
-git clone https://github.com/jkf87/openclaw-claude-session-bridge.git
-cd openclaw-claude-session-bridge
-npm install
-npm run build
+npm install && npm run build
 ```
 
-Optional global install:
+### CLI 명령어
+
+| 명령어 | 설명 |
+|--------|------|
+| `init` | 브릿지 상태 디렉토리 초기화 |
+| `spawn` | 새 Claude ACP 세션 생성 |
+| `send <message>` | 활성 세션에 메시지 전송 |
+| `status [key]` | 로컬 상태 조회 (--real: 원격 프로브 포함) |
+| `bind <key>` | 세션 메타데이터 업데이트 |
+| `export-config` | 세션 바인딩 JSON 내보내기 |
+| `import-config <file>` | 내보낸 설정 가져오기 |
+
+### 시뮬레이션
 
 ```bash
-npm link
-openclaw-bridge --help
+npm run build && npm run simulate
 ```
 
-## CLI Commands
+## 아키텍처
 
-| Command | Description |
-|---------|-------------|
-| `init` | Initialize the bridge state directory (`.openclaw-bridge/`) |
-| `spawn` | Spawn a new Claude ACP child session |
-| `send <message>` | Send a follow-up message to the active session |
-| `status [sessionKey]` | Show local state, and with `--real` also probe remote ACP status |
-| `bind <sessionKey>` | Update local metadata (label, tags) on a session |
-| `export-config` | Export session bindings as JSON |
-| `import-config <file>` | Import a previously exported bridge config |
-
-## Real mode usage
-
-```bash
-# initialize local state
-openclaw-bridge --real --manager-session bridge:manager:claude init
-
-# spawn a persistent Claude ACP session
-openclaw-bridge \
-  --real \
-  --manager-session bridge:manager:claude \
-  --cwd /absolute/path/to/project \
-  spawn --label "bridge-test"
-
-# send follow-ups to the saved active session
-openclaw-bridge --real --manager-session bridge:manager:claude send "Reply with exactly: HELLO"
-openclaw-bridge --real --manager-session bridge:manager:claude send "Now say SECOND"
-
-# inspect local + remote status
-openclaw-bridge --real --manager-session bridge:manager:claude status
-
-# bind local metadata
-openclaw-bridge --real --manager-session bridge:manager:claude bind <childSessionKey> --label "important" --tag env=prod
 ```
-
-## Simulated mode usage
-
-```bash
-openclaw-bridge init
-openclaw-bridge spawn --label "demo"
-openclaw-bridge send "Hello Claude"
-openclaw-bridge status
-```
-
-## Library API
-
-```ts
-import {
-  RealGatewayCliAdapter,
-  SessionBridge,
-} from "openclaw-claude-session-bridge";
-
-const bridge = new SessionBridge({
-  gateway: new RealGatewayCliAdapter({
-    managerSessionKey: "bridge:manager:claude",
-    cwd: process.cwd(),
-    agentId: "claude",
-  }),
-});
-
-await bridge.spawn({ label: "my-session" });
-await bridge.send("Continue from the previous instruction.");
-const probe = await bridge.probe();
-console.log(probe.data);
-```
-
-## Architecture
-
-```text
 openclaw-claude-session-bridge/
+├── SKILL.md              ← 스킬 문서 (메인, 에이전트에게 제공)
+├── README.md
 ├── src/
-│   ├── types.ts
-│   ├── state.ts
-│   ├── bridge.ts      # simulated + real CLI gateway adapters
-│   ├── cli.ts
-│   └── index.ts
+│   ├── types.ts          ← 타입 정의
+│   ├── state.ts          ← 로컬 상태 관리
+│   ├── bridge.ts         ← 게이트웨이 어댑터 + 브릿지 클래스
+│   ├── cli.ts            ← CLI 진입점
+│   └── index.ts          ← 라이브러리 엔트리
 ├── simulate/
-│   └── scenarios.ts
+│   └── scenarios.ts      ← 시뮬레이션 시나리오
 ├── bin/
 │   └── openclaw-bridge.js
 ├── package.json
 ├── tsconfig.json
-├── LICENSE
-└── README.md
+└── LICENSE
 ```
 
-## State file
+## 기존 ACPX 기능과의 관계
 
-The bridge persists state in `.openclaw-bridge/bridge-state.json` under the current working directory by default.
+이 프로젝트는 ACPX의 기존 기능(`acpx claude sessions new`, `prompt`, `status`, `revive`)을 **별도의 TypeScript 래퍼로 재구현**한 것이 아니라, **에이전트가 직접 활용할 수 있도록 문서화**한 것입니다.
 
-Example:
-
-```json
-{
-  "version": 1,
-  "activeSessionKey": "agent:claude:acp:...",
-  "sessions": {
-    "agent:claude:acp:...": {
-      "childSessionKey": "agent:claude:acp:...",
-      "status": "active",
-      "metadata": {
-        "label": "bridge-test",
-        "createdAt": "2026-03-10T...Z",
-        "updatedAt": "2026-03-10T...Z"
-      },
-      "history": []
-    }
-  }
-}
-```
-
-## How this maps to OpenClaw ACP features
-
-### Spawn
-
-The bridge uses `/acp spawn claude --mode persistent --thread off --cwd ...` in a manager session and stores the returned `childSessionKey`.
-
-### Send
-
-The bridge uses `/acp steer --session <childSessionKey> ...` so later invocations can continue using the same saved session key.
-
-### Binding
-
-The bridge currently provides **local binding metadata** (`label`, `tags`) and config export/import. It does **not** mutate OpenClaw channel thread bindings.
-
-### Status
-
-The bridge uses `/acp status <childSessionKey>` and classifies the transport as:
-- `warm`: queue owner reachable right now
-- `cold`: queue owner unavailable (often revivable on next steer)
-- `missing`: target cannot be resolved
-
-## Honest limitations
-
-- **Real mode depends on OpenClaw CLI/Gateway** being configured and reachable.
-- **Manager-session based**: real mode currently relies on supported slash-command flows rather than a dedicated public Node RPC for ACP spawn/steer.
-- **Session lifetime is not guaranteed**: a saved `childSessionKey` may go `cold` (queue owner unavailable) or become truly missing depending on ACP runtime and local records.
-- **Local binding only**: this tool stores labels/tags locally; it does not configure Telegram/Discord thread binding policy for you.
-- **History is capped** at 50 messages per session to bound state size.
-
-## Running the simulation
-
-```bash
-npm run build
-npm run simulate
-```
-
-This exercises 5 scenarios:
-1. Fresh spawn
-2. Follow-up send to the same session
-3. Resume from saved state
-4. Missing session handling
-5. Config/binding export/import flow
+- 핵심 가치는 `SKILL.md` — 에이전트에게 주면 바로 재현 가능
+- TypeScript 구현체는 참고용 레퍼런스
 
 ## License
 
